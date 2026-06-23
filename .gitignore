@@ -1,0 +1,47 @@
+# ─── Secrets ───
+.env
+.env.*
+!.env.example
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+
+# ─── Virtualenv / uv ───
+.venv/
+venv/
+env/
+
+# ─── Logs / runtime ───
+*.log
+update.log
+update.cron.log
+bridge.log
+*.pid
+
+# ─── Test artifacts ───
+test_*.py
+test_*.log
+__pycache__/
+.pytest_cache/
+
+# ─── Editor / OS ───
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ─── Backups ───
+*.bak
+*.backup
+napcat.AppImage.bak
+squashfs-root.bak/
