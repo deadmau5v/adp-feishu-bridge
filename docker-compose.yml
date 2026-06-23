@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────
+# ADP-NapCatQQ Bridge - Docker Compose 示例
+# 用法:
+#   1. 复制 .env.example 为 .env, 填好 ADP_APP_KEY 等凭据
+#   2. docker compose up -d
+# ─────────────────────────────────────────────────────────────
+#
+# ⚠️ NapCat 是 GUI 程序，容器内跑需加 Xvfb + xdotool
+#    这里采用最简方案：NapCat 容器跑无头模式，仅用 onebot11 网络协议
+#    首次启动需扫码登录（WebUI 端口 6099），之后状态由 volume 持久化
+#
+# 如已有现成 NapCat 实例（本机或别处），可只启 bridge 服务：
+#   docker compose up -d bridge
+#   并把 NAPCAT_HTTP_URL 指向现成实例
+
+services:
+
+  # ──────────── NapCatQQ (可选) ────────────
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: adp-bridge-napcat
+    restart: unless-stopped
+    environment:
+      - NAPCAT_UID=${NAPCAT_UID:-2020268674}
+      # 让 NapCat 走 onebot11 网络协议（无 GUI 友好）
+      - NAPCAT_NETWORK_MODE=ws
+    ports:
+      - "6099:6099"   # WebUI（首次扫码用）
+      - "3001:3001"   # onebot11 HTTP（bridge 调用）
+    volumes:
+      - napcat-data:/app/.config/QQ/NapCat
+    networks:
+      - adp-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:6099/api/qq/GetQQLoginInfo"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ──────────── Bridge ────────────
+  bridge:
+    # 本地构建：docker build -t adp-napcat-bridge:local .
+    # 远端镜像：ghcr.io/deadmau5v/adp-napcat-bridge:latest
+    image: ghcr.io/deadmau5v/adp-napcat-bridge:latest
+    container_name: adp-bridge
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 若 bridge 与 napcat 同网络，可用服务名直连
+      - NAPCAT_HTTP_URL=http://napcat:3001
+      - NAPCAT_WS_URL=ws://napcat:3001
+      # 反向 WS：NapCat 连 bridge
+      - BRIDGE_HOST=0.0.0.0
+      - BRIDGE_PORT=8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      napcat:
+        condition: service_healthy
+    networks:
+      - adp-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  adp-net:
+    driver: bridge
+
+volumes:
+  napcat-data:

@@ -1,0 +1,140 @@
+name: Docker Image
+
+# ─────────────────────────────────────────────────────────────
+# 构建并推送多架构 Docker 镜像到 GitHub Container Registry
+#
+# 触发：
+#   - push tag v*.*.*        → 自动发版（latest + 版本号 + 短 SHA）
+#   - workflow_dispatch      → 手动构建（自定义 tag 后缀）
+#
+# 产物：
+#   ghcr.io/<owner>/adp-napcat-bridge
+#     :latest
+#     :1.0.0           (v1.0.0)
+#     :1.0             (v1.0.0)
+#     :1               (v1.0.0)
+#     :sha-abc1234     (任意构建)
+#
+# 平台：linux/amd64 + linux/arm64
+#
+# 仓库 Settings → Actions → General：
+#   Workflow permissions = "Read and write permissions"  ← 必须
+# ─────────────────────────────────────────────────────────────
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag_suffix:
+        description: "自定义 tag 后缀（留空用 'manual-<sha>'）"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/adp-napcat-bridge
+
+jobs:
+  build:
+    name: build & push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA::7}"
+          FULL_SHA="${GITHUB_SHA::12}"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            # refs/tags/v1.2.3 → 1.2.3
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            SUFFIX="${{ inputs.tag_suffix }}"
+            [[ -n "${SUFFIX}" ]] && VERSION="${VERSION}-${SUFFIX}"
+          else
+            # manual dispatch
+            SUFFIX="${{ inputs.tag_suffix }}"
+            if [[ -n "${SUFFIX}" ]]; then
+              VERSION="manual-${SUFFIX}"
+            else
+              VERSION="manual-${SHORT_SHA}"
+            fi
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "major_minor_patch=${VERSION%%-*}"   # 去掉可能的后缀
+            echo "short_sha=${SHORT_SHA}"
+            echo "full_sha=${FULL_SHA}"
+            echo "is_prerelease=$([[ "${VERSION}" == *-* ]] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push multi-arch
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_NAME }}:latest
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.major_minor_patch }}
+            ghcr.io/${{ env.IMAGE_NAME }}:sha-${{ steps.meta.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_NAME }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  release:
+    name: create GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

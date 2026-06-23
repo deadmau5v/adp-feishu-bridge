@@ -1,0 +1,104 @@
+name: CI
+
+# ─────────────────────────────────────────────────────────────
+# 代码质量检查 + Python 语法校验
+# 触发：push / PR 到 main，以及手动 dispatch
+# ─────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff mypy
+
+      - name: Ruff lint
+        run: ruff check . --output-format=github
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Compile-check (语法)
+        run: |
+          set -e
+          for f in main.py config.py constants.py adp_client.py napcat_client.py handler.py; do
+            echo "compile-check: $f"
+            python -m py_compile "$f"
+          done
+
+      - name: MyPy (best-effort)
+        continue-on-error: true
+        run: mypy --ignore-missing-imports --no-strict-optional --warn-unused-ignores .
+
+  smoke:
+    name: smoke import + health
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Import smoke
+        env:
+          ADP_APP_KEY: dummy
+          ADP_BOT_APP_KEY: dummy
+        run: |
+          python -c "
+          import main
+          from config import ADPConfig, NapCatConfig, BridgeConfig
+          a = ADPConfig.from_env()
+          n = NapCatConfig.from_env()
+          b = BridgeConfig.from_env()
+          assert a.chat_url.startswith('https://'), 'ADP url should be https'
+          assert n.http_url.startswith('http://') or n.http_url.startswith('https://')
+          assert b.trigger_mode in ('at', 'always')
+          assert b.max_history_turns >= 0
+          assert b.max_query_length > 0
+          print(f'ADP url       : {a.chat_url}')
+          print(f'NapCat base   : {n.http_url}')
+          print(f'Bridge mode   : {n.connect_mode} on {n.ws_host}:{n.ws_port}{n.ws_path}')
+          print(f'Trigger       : {b.trigger_mode}  history_turns={b.max_history_turns}')
+          print('SMOKE_OK')
+          "

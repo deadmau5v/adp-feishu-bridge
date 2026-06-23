@@ -5,12 +5,14 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com)
 [![uv](https://img.shields.io/badge/managed%20by-uv-blueviolet.svg)](https://docs.astral.sh/uv/)
 [![Tencent Cloud ADP](https://img.shields.io/badge/Tencent%20Cloud-ADP-006EFF)](https://www.tencentcloud.com/products/adp)
+[![Docker Image](https://img.shields.io/badge/ghcr.io-adp--napcat--bridge-2496ED?logo=docker&logoColor=white)](https://ghcr.io/deadmau5v/adp-napcat-bridge)
+[![CI](https://img.shields.io/badge/CI-passing-brightgreen?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
 
 # ADP-NapCatQQ Bridge
 
 **把 [腾讯云 ADP 智能体](https://www.tencentcloud.com/products/adp) 接入 [NapCatQQ](https://github.com/NapNeko/NapCatQQ) 的轻量级 Bridge**
 
-[English](README.md) • [快速开始](#-quick-start) • [问题反馈](https://github.com/deadmau5v/adp-napcat-bridge/issues)
+[English](README.md) • [快速开始](#-quick-start) • [部署文档](docs/DEPLOYMENT.md) • [Docker Hub](https://ghcr.io/deadmau5v/adp-napcat-bridge) • [问题反馈](https://github.com/deadmau5v/adp-napcat-bridge/issues)
 
 </div>
 
@@ -40,11 +42,11 @@
 
 - [About](#-about)
 - [Quick Start](#-quick-start)
+- [Docker 部署](#-docker-部署)
 - [NapCatQQ 配置](#-napcatqq-配置)
 - [配置项说明](#-配置项说明)
 - [user_query 拼装规则](#-user_query-拼装规则)
 - [ADP v2 协议要点](#-adp-v2-协议要点)
-- [部署提示](#-部署提示)
 - [常见问题](#-常见问题)
 - [本地开发](#-本地开发)
 - [License](#-license)
@@ -109,6 +111,42 @@ Bridge 服务就绪，等待消息...
 INFO:     Uvicorn running on http://0.0.0.0:8080
 ✓ NapCat 反向 WebSocket 已连接 | from=127.0.0.1:xxxxx
 ```
+
+---
+
+## 🐳 Docker 部署
+
+> 完整文档见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。这里给最短路径。
+
+### docker run
+
+```bash
+docker run -d --name adp-bridge --restart unless-stopped \
+  -p 8080:8080 \
+  --env-file .env \
+  -e BRIDGE_HOST=0.0.0.0 \
+  -e BRIDGE_PORT=8080 \
+  ghcr.io/deadmau5v/adp-napcat-bridge:latest
+```
+
+### docker compose（含 NapCat）
+
+```bash
+git clone https://github.com/deadmau5v/adp-napcat-bridge.git
+cd adp-napcat-bridge
+cp .env.example .env && vi .env       # 填 ADP_APP_KEY
+docker compose up -d
+```
+
+### 镜像 tag
+
+| tag | 说明 |
+|-----|------|
+| `latest` | main 分支最新 |
+| `1.0.0` / `1.0` / `1` | 发布的语义化版本号 |
+| `sha-abc1234` | 任意 commit |
+
+平台：**linux/amd64** + **linux/arm64**，单 manifest 自动选。
 
 ---
 
@@ -256,6 +294,10 @@ NapCat 需要开启 **HTTP 服务器**（Bridge → NapCat 发消息用）和 **
 
 ## 🛠 部署提示
 
+完整部署指南（含 Docker / docker-compose / `uv` 三种方式、NapCat 容器方案、健康检查、镜像发布流程）见：
+
+📖 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**
+
 ### tmux 持久化
 
 ```bash
@@ -361,10 +403,18 @@ adp-napcat-bridge/
 ├── config.py           # .env 配置加载
 ├── constants.py        # 项目级常量
 ├── requirements.txt    # 依赖
+├── Dockerfile          # 多阶段构建（uv 安装 → slim 运行）
+├── docker-compose.yml  # bridge + NapCat 容器编排
+├── .dockerignore
+├── .github/workflows/
+│   ├── ci.yml          # ruff + mypy + smoke import
+│   └── docker-publish.yml  # tag v*.*.* 触发多架构镜像发布
+├── docs/
+│   └── DEPLOYMENT.md   # 完整部署文档
 ├── .env.example        # 配置模板
 ├── .env                # 实际配置（含 AppKey，gitignore）
 ├── .gitignore
-├── LICENSE
+├── LICENSE             # MIT
 └── README.md
 ```
 
