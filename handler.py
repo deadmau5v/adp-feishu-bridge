@@ -169,10 +169,11 @@ class MessageHandler:
         return reply
 
     async def _call_adp_stream(self, content, session_id, user_id, group_id) -> str:
-        """流式：收到 ADP 片段就攒批发送"""
+        """流式：仅发送 Type=reply 消息的 text.delta 分段，其他类型静默丢弃"""
         buffer = ""
         batch_size = self.bridge.streaming_batch_size
         visitor_id = self._make_visitor_id(user_id, group_id)
+        last_reply: str = ""
 
         async for event in self.adp.chat_stream(content, session_id,
                                                   visitor_id=visitor_id):
@@ -184,6 +185,13 @@ class MessageHandler:
                 )
                 return event.content
 
+            # 只处理 reply 类型的消息；thought / tool_call 中间过程静默
+            if event.message_type != "reply":
+                continue
+
+            if event.event_type == "message.done" and event.final_reply:
+                last_reply = event.final_reply
+
             if event.content:
                 buffer += event.content
                 while len(buffer) >= batch_size:
@@ -194,15 +202,25 @@ class MessageHandler:
                         max_length=self.bridge.max_msg_length,
                     )
 
-            if event.is_final:
-                break
-
-        if buffer.strip():
+        # 流结束后，把 message.done 的 final_reply 兜底发出（如果还有未发的部分）
+        if last_reply and (not buffer or last_reply != buffer):
+            tail = last_reply
+            if buffer and last_reply.startswith(buffer):
+                tail = last_reply[len(buffer):]
+            if tail.strip():
+                await self.napcat.send_msg_segments(
+                    tail,
+                    user_id=user_id, group_id=group_id,
+                    max_length=self.bridge.max_msg_length,
+                )
+                buffer = last_reply
+        elif buffer.strip() and not last_reply:
             await self.napcat.send_msg_segments(
                 buffer,
                 user_id=user_id, group_id=group_id,
                 max_length=self.bridge.max_msg_length,
             )
+
         logger.info("流式回复完成 | user=%s | visitor=%s | reply_len=%d",
                     user_id, visitor_id, len(buffer))
         return buffer
@@ -340,9 +358,6 @@ class MessageHandler:
         if dq is None:
             dq = deque(maxlen=max(self.bridge.max_history_turns, 1))
             self._history[session_id] = dq
-        else:
-            # 调整 maxlen
-            dq.maxlen = max(self.bridge.max_history_turns, 1)
         dq.append(turn)
 
     # ────────────────── 工具方法 ──────────────────

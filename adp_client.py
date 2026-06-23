@@ -40,9 +40,11 @@ class ADPEvent:
     """ADP SSE 事件（流式）"""
     event_type: str          # text.delta / message.done / error / done 等
     content: str             # 文本增量内容（text.delta 用）
-    final_reply: str         # 最终完整回复（message.done 时填入）
+    final_reply: str         # 最终完整回复（message.done 且 Type=reply 时填入）
     raw: dict                # 原始 JSON
     is_final: bool           # 是否为流结束
+    message_type: str = ""   # 所属 message 的 Type：reply / thought / tool_call
+    message_id: str = ""     # 所属 message 的 MessageId
 
 
 class ADPClient:
@@ -94,6 +96,12 @@ class ADPClient:
         client = await self.get_client()
         logger.info("调用 ADP v2 | session=%s | content=%s", session_id, content[:80])
 
+        # ADP 同一请求会推送多个 message（thought / tool_call / reply），
+        # 各自有自己的 MessageId。text.delta / text.replace 事件只带 MessageId
+        # 不带 Type，所以需要在 chat_stream 内部维护 message_id → type 映射，
+        # 再把 text.* 事件的 message_type 填好供下游判断是否要累积。
+        msg_type_map: dict[str, str] = {}
+
         try:
             async with client.stream(
                 "POST",
@@ -115,7 +123,7 @@ class ADPClient:
 
                     if not line:
                         if data_buffer:
-                            ev = self._handle_sse_event(event_type, data_buffer)
+                            ev = self._handle_sse_event(event_type, data_buffer, msg_type_map)
                             if ev:
                                 yield ev
                                 if ev.is_final:
@@ -130,7 +138,7 @@ class ADPClient:
                         data_buffer += line[5:].strip()
 
                 if data_buffer:
-                    ev = self._handle_sse_event(event_type, data_buffer)
+                    ev = self._handle_sse_event(event_type, data_buffer, msg_type_map)
                     if ev:
                         yield ev
 
@@ -144,8 +152,13 @@ class ADPClient:
             logger.exception("ADP 调用异常")
             yield ADPEvent("error", f"[ADP 调用异常: {e}]", "", {}, True)
 
-    def _handle_sse_event(self, event_type: str, data_str: str) -> ADPEvent | None:
-        """处理单个 SSE 事件"""
+    def _handle_sse_event(
+        self,
+        event_type: str,
+        data_str: str,
+        msg_type_map: dict[str, str],
+    ) -> ADPEvent | None:
+        """处理单个 SSE 事件。msg_type_map 会被 message.added / message.done 更新。"""
         if data_str == "[DONE]":
             return ADPEvent("done", "", "", {}, True)
 
@@ -157,17 +170,37 @@ class ADPClient:
 
         kind = data.get("Type") or event_type or "unknown"
 
+        # message.added 提前告知这是 thought / reply / tool_call
+        if kind == "message.added":
+            msg = data.get("Message", {}) or {}
+            mid = msg.get("MessageId", "")
+            mtype = msg.get("Type", "")
+            if mid and mtype:
+                msg_type_map[mid] = mtype
+            return None
+
         if kind == "text.delta":
-            return ADPEvent("text.delta", data.get("Text", ""), "", data, False)
+            mid = data.get("MessageId", "")
+            mtype = msg_type_map.get(mid, "")
+            return ADPEvent("text.delta", data.get("Text", ""), "", data, False,
+                            message_type=mtype, message_id=mid)
 
         if kind == "text.replace":
-            return ADPEvent("text.replace", data.get("Text", ""), "", data, False)
+            mid = data.get("MessageId", "")
+            mtype = msg_type_map.get(mid, "")
+            return ADPEvent("text.replace", data.get("Text", ""), "", data, False,
+                            message_type=mtype, message_id=mid)
 
         if kind == "message.done":
             msg = data.get("Message", {})
-            reply_text = self._extract_reply_text(msg)
+            mid = msg.get("MessageId", "")
+            mtype = msg.get("Type", "")
+            if mid and mtype:
+                msg_type_map[mid] = mtype
+            reply_text = self._extract_reply_text(msg) if mtype == "reply" else ""
             if reply_text:
-                return ADPEvent("message.done", "", reply_text, data, False)
+                return ADPEvent("message.done", "", reply_text, data, False,
+                                message_type=mtype, message_id=mid)
             return None
 
         if kind == "response.completed":
@@ -180,9 +213,8 @@ class ADPClient:
             logger.error("ADP error 事件 | code=%s | msg=%s", code, msg)
             return ADPEvent("error", f"[ADP {code}] {msg}", "", data, True)
 
-        if kind in ("request_ack", "response.created", "message.added",
-                    "content.added", "message.processing", "reference.added",
-                    "quote_info.added"):
+        if kind in ("request_ack", "response.created", "content.added",
+                    "message.processing", "reference.added", "quote_info.added"):
             return None
 
         return None
@@ -200,25 +232,38 @@ class ADPClient:
 
     async def chat(self, content: str, session_id: str, visitor_id: str | None = None) -> str:
         """
-        非流式：收集完整 reply 后返回。
+        非流式：只收集 ``Type=reply`` 的消息内容作为最终回复。
+
+        ADP v2 智能体在 thought / tool_call 阶段也会推 text.delta，
+        这些是中间过程（思考/工具结果），对用户不可见；只有 reply 类型
+        message 的 text.delta / message.done 携带的 Contents[0].Text
+        才是真正给用户看的。
 
         :param content:    用户消息
         :param session_id: 会话 ID
         :param visitor_id: 访客 ID（覆盖配置中的默认值）
-        :return:           完整回复文本（reply 类型）
+        :return:           完整 reply 文本；没收到 reply 时返回 ""
         """
-        final = ""
-        chunks: list[str] = []
+        reply_buf: list[str] = []
+        last_reply: str = ""
+        saw_reply_message: bool = False
 
         async for ev in self.chat_stream(content, session_id, visitor_id=visitor_id):
             if ev.event_type == "error":
                 return ev.content
-            if ev.event_type == "text.delta" and ev.content:
-                chunks.append(ev.content)
-            elif ev.event_type == "text.replace" and ev.content:
-                chunks = [ev.content]
-            elif ev.event_type == "message.done" and ev.final_reply:
-                final = ev.final_reply
-                break
+            if ev.message_type == "reply":
+                saw_reply_message = True
+                if ev.event_type == "text.delta" and ev.content:
+                    reply_buf.append(ev.content)
+                elif ev.event_type == "text.replace" and ev.content is not None:
+                    # 增量模式下偶尔出现：重置 buffer
+                    reply_buf = [ev.content]
+                elif ev.event_type == "message.done" and ev.final_reply:
+                    last_reply = ev.final_reply
 
-        return final or "".join(chunks).strip() or "[ADP 返回为空]"
+        # 优先取 message.done 的 final_reply（完整版），其次取 text.delta 累积版
+        if last_reply:
+            return last_reply
+        if saw_reply_message and reply_buf:
+            return "".join(reply_buf).strip()
+        return ""
