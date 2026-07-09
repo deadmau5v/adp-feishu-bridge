@@ -127,7 +127,11 @@ class FeishuClient:
             return
 
         if self.config.debug_raw_event:
-            logger.debug("飞书事件: %s", json.dumps(event, ensure_ascii=False)[:500])
+            debug_view = {k: v for k, v in event.items() if k != "raw"}
+            try:
+                logger.debug("飞书事件: %s", json.dumps(debug_view, ensure_ascii=False)[:500])
+            except Exception:
+                logger.debug("飞书事件: %s", repr(debug_view)[:500])
 
         # 推到主 asyncio loop
         try:
