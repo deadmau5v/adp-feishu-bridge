@@ -44,7 +44,7 @@ class FeishuClient:
         self.config = config
         self._on_message = on_message
         self._http: httpx.AsyncClient | None = None
-        self._tenant_token: str | ""
+        self._tenant_token: str = ""
         self._token_expire_at: float = 0.0
         self._token_lock = asyncio.Lock()
         self._ws_thread: threading.Thread | None = None
@@ -70,7 +70,6 @@ class FeishuClient:
         后台任务调用，本服务用 threading.Thread 跑，不阻塞 asyncio loop。
         """
         import lark_oapi as lark
-        from lark_oapi.event.dispatcher import EventDispatcherHandler
 
         handler = (
             lark.EventDispatcherHandler.builder("", "")

@@ -5,11 +5,9 @@
 （带上下文/触发人/历史）→ 调用 ADP → 回复消息
 """
 
-import asyncio
 import logging
 import re
 import time
-import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque

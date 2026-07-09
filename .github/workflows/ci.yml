@@ -96,9 +96,17 @@ jobs:
           assert b.trigger_mode in ('at', 'always')
           assert b.max_history_turns >= 0
           assert b.max_query_length > 0
-          # 故意触发配置校验失败（缺 AppKey 之类），确保 validate 路径被覆盖
-          assert len(a.validate()) >= 1
-          assert len(f.validate()) >= 1
+          # 配齐必填项时 validate 不报错
+          assert a.validate() == [], a.validate()
+          assert f.validate() == [], f.validate()
+          # 缺必填项时 validate 必须报错（用空 dataclass 触发）
+          empty_a = ADPConfig(chat_url=a.chat_url, bot_app_key='',
+                              visitor_id='', streaming_throttle=5, timeout=120)
+          empty_f = FeishuConfig(app_id='', app_secret='', domain='feishu',
+                                 log_level='INFO', debug_raw_event=False, bot_open_id='')
+          assert 'ADP_BOT_APP_KEY' in '\n'.join(empty_a.validate())
+          assert 'FEISHU_APP_ID' in '\n'.join(empty_f.validate())
+          assert 'FEISHU_APP_SECRET' in '\n'.join(empty_f.validate())
           print(f'ADP url       : {a.chat_url}')
           print(f'Feishu domain : {f.domain}')
           print(f'Trigger       : {b.trigger_mode}  history_turns={b.max_history_turns}')

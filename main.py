@@ -9,7 +9,6 @@ ADP-Feishu Bridge 服务主程序
   - 收到飞书消息后 → handler → ADP → 飞书 REST 发回
 """
 
-import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
