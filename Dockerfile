@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # ─────────────────────────────────────────────────────────────
-# ADP-NapCatQQ Bridge - production image
+# ADP-Feishu Bridge - production image
 # Multi-stage build: uv for deps, slim runtime for size
 # ─────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 
 # 应用代码
-COPY main.py config.py constants.py adp_client.py napcat_client.py handler.py ./
+COPY main.py config.py constants.py adp_client.py feishu_client.py handler.py ./
 COPY .env.example .env.example
 
 # 非 root 运行（uid/gid 1001 避开 SYS_UID_MAX 999 警告）
@@ -53,13 +53,13 @@ RUN groupadd --system --gid 1001 bridge && \
     chown -R bridge:bridge /app
 USER bridge
 
-# 端口：bridge 默认 8080
+# 端口：bridge 默认 8080（健康检查用；飞书长连接走出站，不依赖端口）
 EXPOSE 8080
 
 # tini 收僵尸进程，python -u 强制无缓冲
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request,sys; \
-sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200 else 1)"
+sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).status == 200 else 1)"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-u", "main.py"]
