@@ -14,7 +14,7 @@ class ADPConfig:
     """腾讯云 ADP 智能体配置（v2 接口）"""
     chat_url: str            # 对话接口地址
     bot_app_key: str         # 应用 AppKey
-    visitor_id: str          # 访客 ID（建议用 QQ 号）
+    visitor_id: str          # 访客 ID（建议用飞书 open_id）
     streaming_throttle: int  # 流式回包粒度
     timeout: int             # SSE 请求超时（秒）
 
@@ -36,38 +36,34 @@ class ADPConfig:
 
 
 @dataclass(frozen=True)
-class NapCatConfig:
-    """NapCatQQ 配置"""
-    connect_mode: str
-    ws_host: str
-    ws_port: int
-    ws_path: str
-    ws_token: str
-    webhook_path: str
-    webhook_token: str
-    http_url: str
-    http_token: str
+class FeishuConfig:
+    """飞书自建应用配置"""
+    app_id: str              # 飞书应用 App ID
+    app_secret: str          # 飞书应用 App Secret
+    domain: str              # 飞书域名：feishu / lark
+    log_level: str           # 飞书 SDK 日志级别
+    debug_raw_event: bool    # 打印原始事件
+    bot_open_id: str         # 机器人 open_id（可选；用于群聊识别 @机器人，不填则只能靠"@_user_x 占位"启发式判断）
 
     @classmethod
-    def from_env(cls) -> "NapCatConfig":
+    def from_env(cls) -> "FeishuConfig":
         return cls(
-            connect_mode=os.getenv("NAPCAT_CONNECT_MODE", "reverse_ws"),
-            ws_host=os.getenv("NAPCAT_WS_HOST", "0.0.0.0"),
-            ws_port=int(os.getenv("NAPCAT_WS_PORT", "8080")),
-            ws_path=os.getenv("NAPCAT_WS_PATH", "/onebot/v11/ws"),
-            ws_token=os.getenv("NAPCAT_WS_TOKEN", ""),
-            webhook_path=os.getenv("NAPCAT_WEBHOOK_PATH", "/onebot/v11/http"),
-            webhook_token=os.getenv("NAPCAT_WEBHOOK_TOKEN", ""),
-            http_url=os.getenv("NAPCAT_HTTP_URL", "http://127.0.0.1:3000"),
-            http_token=os.getenv("NAPCAT_HTTP_TOKEN", ""),
+            app_id=os.getenv("FEISHU_APP_ID", ""),
+            app_secret=os.getenv("FEISHU_APP_SECRET", ""),
+            domain=os.getenv("FEISHU_DOMAIN", "feishu"),
+            log_level=os.getenv("FEISHU_LOG_LEVEL", "INFO"),
+            debug_raw_event=os.getenv("BRIDGE_DEBUG_RAW_EVENT", "false").lower() in ("true", "1", "yes"),
+            bot_open_id=os.getenv("FEISHU_BOT_OPEN_ID", ""),
         )
 
     def validate(self) -> list[str]:
         errors = []
-        if self.connect_mode not in ("reverse_ws", "webhook"):
-            errors.append(f"NAPCAT_CONNECT_MODE 仅支持 reverse_ws / webhook，当前值: {self.connect_mode}")
-        if not self.http_url:
-            errors.append("NAPCAT_HTTP_URL 未配置")
+        if not self.app_id:
+            errors.append("FEISHU_APP_ID 未配置")
+        if not self.app_secret:
+            errors.append("FEISHU_APP_SECRET 未配置")
+        if self.domain not in ("feishu", "lark"):
+            errors.append(f"FEISHU_DOMAIN 仅支持 feishu / lark，当前值: {self.domain}")
         return errors
 
 
@@ -75,8 +71,8 @@ class NapCatConfig:
 class BridgeConfig:
     """Bridge 服务行为配置"""
     trigger_mode: str
-    allowed_groups: list[str]
-    allowed_users: list[str]
+    allowed_chats: list[str]    # 飞书 chat_id 白名单（群或私聊），空=不过滤
+    allowed_users: list[str]    # 飞书 open_id 白名单，空=不过滤
     streaming_send: bool
     streaming_batch_size: int
     max_msg_length: int
@@ -99,7 +95,7 @@ class BridgeConfig:
 
         return cls(
             trigger_mode=os.getenv("BRIDGE_TRIGGER_MODE", "at"),
-            allowed_groups=_split(os.getenv("BRIDGE_ALLOWED_GROUPS", "")),
+            allowed_chats=_split(os.getenv("BRIDGE_ALLOWED_CHATS", "")),
             allowed_users=_split(os.getenv("BRIDGE_ALLOWED_USERS", "")),
             streaming_send=os.getenv("BRIDGE_STREAMING_SEND", "false").lower() in ("true", "1", "yes"),
             streaming_batch_size=int(os.getenv("BRIDGE_STREAMING_BATCH_SIZE", "50")),
@@ -114,5 +110,5 @@ class BridgeConfig:
     def validate(self) -> list[str]:
         errors = []
         if self.trigger_mode not in ("at", "always"):
-            errors.append(f"BRIDGE_TRIGGER_MODE 仅支持 at / always，当前值: {self.bridge.trigger_mode}")
+            errors.append(f"BRIDGE_TRIGGER_MODE 仅支持 at / always，当前值: {self.trigger_mode}")
         return errors

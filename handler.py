@@ -1,8 +1,8 @@
 """
 消息处理器 — 核心业务逻辑
 
-接收 OneBot v11 事件 → 判断是否需要响应 → 拼装 user_query（带上下文/触发人/历史）
-→ 调用 ADP → 回复消息
+接收飞书事件（im.message.receive_v1）→ 判断是否需要响应 → 拼装 user_query
+（带上下文/触发人/历史）→ 调用 ADP → 回复消息
 """
 
 import asyncio
@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from typing import Deque
 
 from adp_client import ADPClient
-from napcat_client import NapCatClient
-from config import BridgeConfig
+from feishu_client import FeishuClient
+from config import BridgeConfig, FeishuConfig
 from constants import APP_NAME
 
 logger = logging.getLogger(f"{APP_NAME}.handler")
@@ -26,7 +26,7 @@ logger = logging.getLogger(f"{APP_NAME}.handler")
 class HistoryTurn:
     """一条多轮上下文记录"""
     role: str          # "user" / "assistant"
-    speaker: str       # 群聊时的发言者名字 / 私聊时的对方昵称
+    speaker: str       # 发言者名字
     text: str          # 消息文本
     ts: float = field(default_factory=time.time)
 
@@ -35,67 +35,60 @@ class HistoryTurn:
 
 
 class MessageHandler:
-    """处理 OneBot v11 消息事件"""
+    """处理飞书 im.message.receive_v1 事件"""
 
     def __init__(
         self,
         adp: ADPClient,
-        napcat: NapCatClient,
+        feishu: FeishuClient,
         bridge: BridgeConfig,
+        feishu_cfg: FeishuConfig,
     ):
         self.adp = adp
-        self.napcat = napcat
+        self.feishu = feishu
         self.bridge = bridge
-        # 正在处理中的会话，防止同一用户连续触发
+        self.feishu_cfg = feishu_cfg
+        # 正在处理中的会话，防止同一会话连续触发
         self._processing: set[str] = set()
         # 每个 session 的最近历史（按 FIFO 淘汰）
-        # key = session_id（不是 visitor_id；私聊按 qq_ 隔离，群聊按 group_ 隔离）
         self._history: dict[str, Deque[HistoryTurn]] = {}
 
     # ────────────────── 主入口 ──────────────────
 
     async def handle_event(self, event: dict) -> None:
         """
-        处理 OneBot v11 事件。
+        处理飞书事件（feishu_client._extract_event 的输出结构）。
         """
-        post_type = event.get("post_type")
-
-        if post_type != "message":
+        chat_type = event.get("chat_type", "")  # p2p / group
+        if chat_type not in ("p2p", "group"):
             return
 
-        # 提取消息信息
-        message_type = event.get("message_type")  # private / group
-        user_id = event.get("user_id", 0)
-        group_id = event.get("group_id")  # 群消息才有
-        raw_message = event.get("raw_message", "")
-        sender = event.get("sender", {})
-        sender_name = sender.get("card") or sender.get("nickname", str(user_id))
+        chat_id = event.get("chat_id", "")
+        sender_open_id = event.get("sender_open_id", "")
+        sender_name = event.get("sender_name", "") or sender_open_id
+        text = event.get("text", "")
+        mentions = event.get("mentions", [])
 
         # 白名单过滤
-        if self.bridge.allowed_users and str(user_id) not in self.bridge.allowed_users:
+        if self.bridge.allowed_users and sender_open_id not in self.bridge.allowed_users:
             return
-        if group_id and self.bridge.allowed_groups and str(group_id) not in self.bridge.allowed_groups:
+        if self.bridge.allowed_chats and chat_id not in self.bridge.allowed_chats:
             return
 
-        # 提取纯文本消息
-        text = self._extract_text(event)
         if not text.strip():
             return
 
         # 触发判断
-        if not self._should_respond(event, text):
+        if not self._should_respond(chat_type, text, mentions):
             return
 
-        # 去掉 @机器人 的 CQ 码，得到纯内容
-        clean_text = self._strip_at(text)
+        # 去掉 @占位符，得到纯内容
+        clean_text = self._strip_at(text, mentions)
         if not clean_text.strip():
             return
 
-        # 构造 session_id — 私聊按 qq_ 隔离，群聊按 group_ 隔离
-        if group_id:
-            session_key = f"group_{group_id}"
-        else:
-            session_key = f"qq_{user_id}"
+        # 构造 session_id
+        session_key = f"group_{chat_id}" if chat_type == "group" else f"feishu_{sender_open_id}"
         session_id = self._make_session_id(session_key)
 
         # 防止并发重复处理
@@ -104,46 +97,52 @@ class MessageHandler:
             return
         self._processing.add(session_id)
 
+        # 群聊需要 reply target = chat_id；私聊用 open_id
+        reply_chat_id = chat_id if chat_type == "group" else None
+        reply_open_id = None if chat_type == "group" else sender_open_id
+
         try:
             logger.info(
-                "处理消息 | type=%s | user=%s(%s) | group=%s | text=%s",
-                message_type, user_id, sender_name, group_id, clean_text[:80],
+                "处理消息 | type=%s | user=%s(%s) | chat=%s | text=%s",
+                chat_type, sender_open_id, sender_name, chat_id, clean_text[:80],
             )
-            # 拼装 user_query（带上下文元数据 + 多轮历史）
             user_query = self._build_user_query(
                 clean_text=clean_text,
                 sender_name=sender_name,
-                user_id=user_id,
-                group_id=group_id,
-                message_type=message_type,
+                user_id=sender_open_id,
+                chat_id=chat_id,
+                chat_type=chat_type,
                 session_id=session_id,
             )
 
-            # 记录到 history（在调用 ADP 之前）
             self._append_history(session_id, HistoryTurn(
                 role="user", speaker=sender_name, text=clean_text,
             ))
 
             if self.bridge.streaming_send:
-                reply = await self._call_adp_stream(user_query, session_id,
-                                                     user_id, group_id)
+                reply = await self._call_adp_stream(
+                    user_query, session_id,
+                    chat_id=reply_chat_id, open_id=reply_open_id,
+                    user_open_id=sender_open_id,
+                )
             else:
-                reply = await self._call_adp_batch(user_query, session_id,
-                                                   user_id, group_id)
+                reply = await self._call_adp_batch(
+                    user_query, session_id,
+                    chat_id=reply_chat_id, open_id=reply_open_id,
+                    user_open_id=sender_open_id,
+                )
 
-            # 把 ADP 回复也写进 history
             if reply:
-                assistant_speaker = "丁真"  # 机器人自己
                 self._append_history(session_id, HistoryTurn(
-                    role="assistant", speaker=assistant_speaker, text=reply,
+                    role="assistant", speaker="丁真", text=reply,
                 ))
 
         except Exception:
-            logger.exception("处理消息异常 | user=%s", user_id)
+            logger.exception("处理消息异常 | user=%s", sender_open_id)
             try:
-                await self.napcat.send_msg_segments(
+                await self.feishu.send_msg_segments(
                     "[处理消息时发生错误，请稍后重试]",
-                    user_id=user_id, group_id=group_id,
+                    chat_id=reply_chat_id, open_id=reply_open_id,
                     max_length=self.bridge.max_msg_length,
                 )
             except Exception:
@@ -153,39 +152,37 @@ class MessageHandler:
 
     # ────────────────── ADP 调用 ──────────────────
 
-    async def _call_adp_batch(self, content, session_id, user_id, group_id) -> str:
+    async def _call_adp_batch(self, content, session_id, chat_id, open_id, user_open_id) -> str:
         """非流式：等 ADP 完整回复后再发送"""
-        visitor_id = self._make_visitor_id(user_id, group_id)
+        visitor_id = self._make_visitor_id(user_open_id, chat_id)
         reply = await self.adp.chat(content, session_id, visitor_id=visitor_id)
         if reply:
-            await self.napcat.send_msg_segments(
+            await self.feishu.send_msg_segments(
                 reply,
-                user_id=user_id,
-                group_id=group_id,
+                chat_id=chat_id, open_id=open_id,
                 max_length=self.bridge.max_msg_length,
             )
             logger.info("回复发送完成 | user=%s | visitor=%s | reply_len=%d",
-                        user_id, visitor_id, len(reply))
+                        user_open_id, visitor_id, len(reply))
         return reply
 
-    async def _call_adp_stream(self, content, session_id, user_id, group_id) -> str:
+    async def _call_adp_stream(self, content, session_id, chat_id, open_id, user_open_id) -> str:
         """流式：仅发送 Type=reply 消息的 text.delta 分段，其他类型静默丢弃"""
         buffer = ""
         batch_size = self.bridge.streaming_batch_size
-        visitor_id = self._make_visitor_id(user_id, group_id)
+        visitor_id = self._make_visitor_id(user_open_id, chat_id)
         last_reply: str = ""
 
         async for event in self.adp.chat_stream(content, session_id,
-                                                  visitor_id=visitor_id):
+                                                 visitor_id=visitor_id):
             if event.event_type == "error":
-                await self.napcat.send_msg_segments(
+                await self.feishu.send_msg_segments(
                     event.content,
-                    user_id=user_id, group_id=group_id,
+                    chat_id=chat_id, open_id=open_id,
                     max_length=self.bridge.max_msg_length,
                 )
                 return event.content
 
-            # 只处理 reply 类型的消息；thought / tool_call 中间过程静默
             if event.message_type != "reply":
                 continue
 
@@ -196,33 +193,32 @@ class MessageHandler:
                 buffer += event.content
                 while len(buffer) >= batch_size:
                     batch, buffer = buffer[:batch_size], buffer[batch_size:]
-                    await self.napcat.send_msg_segments(
+                    await self.feishu.send_msg_segments(
                         batch,
-                        user_id=user_id, group_id=group_id,
+                        chat_id=chat_id, open_id=open_id,
                         max_length=self.bridge.max_msg_length,
                     )
 
-        # 流结束后，把 message.done 的 final_reply 兜底发出（如果还有未发的部分）
         if last_reply and (not buffer or last_reply != buffer):
             tail = last_reply
             if buffer and last_reply.startswith(buffer):
                 tail = last_reply[len(buffer):]
             if tail.strip():
-                await self.napcat.send_msg_segments(
+                await self.feishu.send_msg_segments(
                     tail,
-                    user_id=user_id, group_id=group_id,
+                    chat_id=chat_id, open_id=open_id,
                     max_length=self.bridge.max_msg_length,
                 )
                 buffer = last_reply
         elif buffer.strip() and not last_reply:
-            await self.napcat.send_msg_segments(
+            await self.feishu.send_msg_segments(
                 buffer,
-                user_id=user_id, group_id=group_id,
+                chat_id=chat_id, open_id=open_id,
                 max_length=self.bridge.max_msg_length,
             )
 
         logger.info("流式回复完成 | user=%s | visitor=%s | reply_len=%d",
-                    user_id, visitor_id, len(buffer))
+                    user_open_id, visitor_id, len(buffer))
         return buffer
 
     # ────────────────── user_query 拼装 ──────────────────
@@ -231,49 +227,43 @@ class MessageHandler:
         self,
         clean_text: str,
         sender_name: str,
-        user_id: int,
-        group_id: int | None,
-        message_type: str,
+        user_id: str,
+        chat_id: str,
+        chat_type: str,
         session_id: str,
     ) -> str:
         """
         拼装最终发给 ADP 的 user_query。
 
         格式：
-          [System]               ← 系统提示词（每行一条规则）
+          [System]                ← 系统提示词
           rule 1
           rule 2
-          [Context] type=private|group | from=昵称(qq) | group=群号(若有) | session=...
-          [History]              ← 多轮历史
+          [Context] type=p2p|group | from=昵称(open_id) | chat=oc_xxx | session=...
+          [History]               ← 多轮历史
           [user] xxx: ...
           [assistant] 丁真: ...
           ...
           [Current] <clean_text>
         """
-        # 系统提示词
         system_block = ""
         if self.bridge.system_prompts:
             system_block = "[System]\n" + "\n".join(self.bridge.system_prompts)
 
-        # 上游上下文元数据
-        ctx_bits = [f"type={message_type}"]
+        ctx_bits = [f"type={chat_type}"]
         ctx_bits.append(f"from={sender_name}({user_id})")
-        if group_id:
-            ctx_bits.append(f"group={group_id}")
+        ctx_bits.append(f"chat={chat_id}")
         ctx_bits.append(f"session={session_id}")
         ctx_line = "[Context] " + " | ".join(ctx_bits)
 
-        # 多轮历史
         history_block = ""
         if self.bridge.max_history_turns > 0:
             turns = list(self._history.get(session_id, []))[-self.bridge.max_history_turns:]
             if turns:
                 history_block = "[History]\n" + "\n".join(t.render() for t in turns)
 
-        # 当前消息
         current_block = f"[Current] {clean_text}"
 
-        # 顺序拼接
         parts = []
         if system_block:
             parts.append(system_block)
@@ -283,7 +273,6 @@ class MessageHandler:
         parts.append(current_block)
         query = "\n".join(parts)
 
-        # 字符上限：超过则从 history 头部丢（system + ctx + current 永远保留）
         max_len = self.bridge.max_query_length
         if len(query) > max_len:
             query = self._trim_to_length(query, history_block, current_block,
@@ -303,16 +292,11 @@ class MessageHandler:
         system_block: str,
         max_len: int,
     ) -> str:
-        """
-        query 超过 max_len 时按 FIFO 丢历史。
-        system + ctx + current 永远保留；超长时丢 history 头部。
-        """
-        # 至少保留 system + ctx + current
+        """query 超过 max_len 时按 FIFO 丢历史。system + ctx + current 永远保留。"""
         prefix_len = (len(system_block) + 1 if system_block else 0) + len(ctx_line) + 1
         suffix_len = len(current_block) + 1
         must_keep_len = prefix_len + suffix_len
         if must_keep_len >= max_len:
-            # current 本身就超长 — 截断 current
             budget = max_len - prefix_len - len("[Current] ") - 4
             truncated_current = current_block[:max(0, budget)] + "..."
             parts = []
@@ -322,7 +306,6 @@ class MessageHandler:
             parts.append(f"[Current] {truncated_current}")
             return "\n".join(parts)
 
-        # history 可用预算
         budget = max_len - must_keep_len
         if not history_block or budget <= 0:
             parts = []
@@ -332,7 +315,6 @@ class MessageHandler:
             parts.append(current_block)
             return "\n".join(parts)
 
-        # 解析 history 为各 turn，按行倒序保留
         lines = [ln for ln in history_block.split("\n") if ln]
         kept: list[str] = []
         for ln in reversed(lines):
@@ -362,84 +344,55 @@ class MessageHandler:
 
     # ────────────────── 工具方法 ──────────────────
 
-    def _should_respond(self, event: dict, text: str) -> bool:
+    def _should_respond(self, chat_type: str, text: str, mentions: list[dict]) -> bool:
         """判断是否应该响应这条消息"""
         if self.bridge.trigger_mode == "always":
             return True
 
         # at 模式：私聊始终响应，群聊仅 @机器人 时响应
-        message_type = event.get("message_type")
-        if message_type == "private":
+        if chat_type == "p2p":
             return True
 
-        if message_type == "group":
-            # 检查消息中是否 @了机器人
-            # OneBot v11 中 @ 表现为 CQ:at,qq=bot_qq
-            return "[CQ:at" in text and self._is_at_bot(event)
+        if chat_type == "group":
+            return self._is_at_bot(mentions)
 
         return False
 
-    def _is_at_bot(self, event: dict) -> bool:
-        """检查是否 @了机器人"""
-        self_id = event.get("self_id", 0)
-        # 检查 message 数组中的 at 段
-        message = event.get("message", [])
-        if isinstance(message, list):
-            for seg in message:
-                if isinstance(seg, dict) and seg.get("type") == "at":
-                    if str(seg.get("data", {}).get("qq", "")) == str(self_id):
-                        return True
-        # 检查 raw_message 中的 CQ 码
-        raw = event.get("raw_message", "")
-        return f"[CQ:at,qq={self_id}]" in raw
+    def _is_at_bot(self, mentions: list[dict]) -> bool:
+        """检查 mentions 中是否包含机器人"""
+        # 优先用配置的 bot_open_id 精确匹配
+        bot_open_id = self.feishu_cfg.bot_open_id
+        if bot_open_id:
+            return any(m.get("open_id") == bot_open_id for m in mentions)
+        # 没配置时回退到占位符启发式：飞书 @ 自己时 key 是 @_user_<n>，
+        # 但跟其他用户无法区分；只能借助 mentions 第一项并依赖配置
+        # —— 强烈建议填写 FEISHU_BOT_OPEN_ID。
+        return False
 
-    def _extract_text(self, event: dict) -> str:
-        """从 OneBot v11 事件中提取纯文本 + CQ 码"""
-        # 优先使用 raw_message（字符串形式，含 CQ 码）
-        raw = event.get("raw_message", "")
-        if raw:
-            return raw
-
-        # 从 message 数组拼接
-        message = event.get("message", [])
-        if isinstance(message, list):
-            parts = []
-            for seg in message:
-                if isinstance(seg, dict):
-                    if seg.get("type") == "text":
-                        parts.append(seg.get("data", {}).get("text", ""))
-                    elif seg.get("type") == "at":
-                        qq = seg.get("data", {}).get("qq", "")
-                        parts.append(f"[CQ:at,qq={qq}]")
-                    else:
-                        parts.append(f"[CQ:{seg.get('type', 'unknown')}]")
-            return "".join(parts)
-        return ""
-
-    def _strip_at(self, text: str) -> str:
-        """去掉 @机器人 的 CQ 码，只留实际内容"""
-        # 移除所有 CQ:at 码
-        cleaned = re.sub(r"\[CQ:at,qq=\d+\]", "", text)
-        return cleaned.strip()
+    @staticmethod
+    def _strip_at(text: str, mentions: list[dict]) -> str:
+        """去掉消息开头的 @占位符（@_user_x），只留实际内容"""
+        for m in mentions:
+            key = m.get("key", "")
+            if key and key in text:
+                text = text.replace(key, "")
+        return text.strip()
 
     def _make_session_id(self, key: str) -> str:
         """
         根据 key 生成合法的 session_id。
         ADP 要求: ^[a-zA-Z0-9_-]{2,64}$
         """
-        # 确保只包含合法字符
         safe = re.sub(r"[^a-zA-Z0-9_-]", "-", key)
-        # 截断到 64 字符以内
         return safe[:64]
 
     @staticmethod
-    def _make_visitor_id(user_id: int, group_id: int | None) -> str:
+    def _make_visitor_id(user_open_id: str, chat_id: str | None) -> str:
         """
         生成访客 ID：
-          - 群聊：group_<group_id>   （整群共享上下文）
-          - 私聊：qq_<user_id>       （每用户独立上下文）
-        ADP v2 的 VisitorId 无长度限制，但为安全起见只允许 [a-zA-Z0-9_-]。
+          - 群聊：group_<chat_id>   （整群共享上下文）
+          - 私聊：feishu_<open_id>  （每用户独立上下文）
         """
-        if group_id:
-            return f"group_{group_id}"
-        return f"qq_{user_id}"
+        if chat_id:
+            return f"group_{chat_id}"
+        return f"feishu_{user_open_id}"

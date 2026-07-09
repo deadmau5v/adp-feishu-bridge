@@ -57,7 +57,7 @@ jobs:
       - name: Compile-check (语法)
         run: |
           set -e
-          for f in main.py config.py constants.py adp_client.py napcat_client.py handler.py; do
+          for f in main.py config.py constants.py adp_client.py feishu_client.py handler.py; do
             echo "compile-check: $f"
             python -m py_compile "$f"
           done
@@ -67,7 +67,7 @@ jobs:
         run: mypy --ignore-missing-imports --no-strict-optional --warn-unused-ignores .
 
   smoke:
-    name: smoke import + health
+    name: smoke import + config validate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -82,23 +82,25 @@ jobs:
           pip install -r requirements.txt
       - name: Import smoke
         env:
-          ADP_APP_KEY: dummy
           ADP_BOT_APP_KEY: dummy
+          FEISHU_APP_ID: dummy
+          FEISHU_APP_SECRET: dummy
         run: |
           python -c "
-          import main
-          from config import ADPConfig, NapCatConfig, BridgeConfig
+          from config import ADPConfig, FeishuConfig, BridgeConfig
           a = ADPConfig.from_env()
-          n = NapCatConfig.from_env()
+          f = FeishuConfig.from_env()
           b = BridgeConfig.from_env()
           assert a.chat_url.startswith('https://'), 'ADP url should be https'
-          assert n.http_url.startswith('http://') or n.http_url.startswith('https://')
+          assert f.domain in ('feishu', 'lark')
           assert b.trigger_mode in ('at', 'always')
           assert b.max_history_turns >= 0
           assert b.max_query_length > 0
+          # 故意触发配置校验失败（缺 AppKey 之类），确保 validate 路径被覆盖
+          assert len(a.validate()) >= 1
+          assert len(f.validate()) >= 1
           print(f'ADP url       : {a.chat_url}')
-          print(f'NapCat base   : {n.http_url}')
-          print(f'Bridge mode   : {n.connect_mode} on {n.ws_host}:{n.ws_port}{n.ws_path}')
+          print(f'Feishu domain : {f.domain}')
           print(f'Trigger       : {b.trigger_mode}  history_turns={b.max_history_turns}')
           print('SMOKE_OK')
           "
