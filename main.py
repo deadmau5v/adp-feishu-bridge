@@ -72,10 +72,15 @@ async def lifespan(app: FastAPI):
     logger.info("ADP-Feishu Bridge 启动中...")
     logger.info("  App ID:        %s***", feishu_config.app_id[:6])
     logger.info("  Domain:        %s", feishu_config.domain)
-    logger.info("  Bot open_id:   %s", feishu_config.bot_open_id or "(未配置，群聊 @识别 失效)")
+    logger.info(
+        "  Bot open_id:   %s", feishu_config.bot_open_id or "(未配置，群聊 @识别 失效)"
+    )
     logger.info("  ADP Chat URL:  %s", adp_config.chat_url)
-    logger.info("  ADP AppKey:    %s***%s", adp_config.bot_app_key[:4],
-                adp_config.bot_app_key[-4:] if len(adp_config.bot_app_key) > 8 else "**")
+    logger.info(
+        "  ADP AppKey:    %s***%s",
+        adp_config.bot_app_key[:4],
+        adp_config.bot_app_key[-4:] if len(adp_config.bot_app_key) > 8 else "**",
+    )
     logger.info("  触发模式:      %s", bridge_config.trigger_mode)
     logger.info("  流式发送:      %s", bridge_config.streaming_send)
     logger.info("  白名单群:      %s", bridge_config.allowed_chats or "全部")

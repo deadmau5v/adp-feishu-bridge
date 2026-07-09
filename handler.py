@@ -23,9 +23,10 @@ logger = logging.getLogger(f"{APP_NAME}.handler")
 @dataclass
 class HistoryTurn:
     """一条多轮上下文记录"""
-    role: str          # "user" / "assistant"
-    speaker: str       # 发言者名字
-    text: str          # 消息文本
+
+    role: str  # "user" / "assistant"
+    speaker: str  # 发言者名字
+    text: str  # 消息文本
     ts: float = field(default_factory=time.time)
 
     def render(self) -> str:
@@ -68,7 +69,10 @@ class MessageHandler:
         mentions = event.get("mentions", [])
 
         # 白名单过滤
-        if self.bridge.allowed_users and sender_open_id not in self.bridge.allowed_users:
+        if (
+            self.bridge.allowed_users
+            and sender_open_id not in self.bridge.allowed_users
+        ):
             return
         if self.bridge.allowed_chats and chat_id not in self.bridge.allowed_chats:
             return
@@ -86,7 +90,9 @@ class MessageHandler:
             return
 
         # 构造 session_id
-        session_key = f"group_{chat_id}" if chat_type == "group" else f"feishu_{sender_open_id}"
+        session_key = (
+            f"group_{chat_id}" if chat_type == "group" else f"feishu_{sender_open_id}"
+        )
         session_id = self._make_session_id(session_key)
 
         # 防止并发重复处理
@@ -102,7 +108,11 @@ class MessageHandler:
         try:
             logger.info(
                 "处理消息 | type=%s | user=%s(%s) | chat=%s | text=%s",
-                chat_type, sender_open_id, sender_name, chat_id, clean_text[:80],
+                chat_type,
+                sender_open_id,
+                sender_name,
+                chat_id,
+                clean_text[:80],
             )
             user_query = self._build_user_query(
                 clean_text=clean_text,
@@ -113,34 +123,49 @@ class MessageHandler:
                 session_id=session_id,
             )
 
-            self._append_history(session_id, HistoryTurn(
-                role="user", speaker=sender_name, text=clean_text,
-            ))
+            self._append_history(
+                session_id,
+                HistoryTurn(
+                    role="user",
+                    speaker=sender_name,
+                    text=clean_text,
+                ),
+            )
 
             if self.bridge.streaming_send:
                 reply = await self._call_adp_stream(
-                    user_query, session_id,
-                    chat_id=reply_chat_id, open_id=reply_open_id,
+                    user_query,
+                    session_id,
+                    chat_id=reply_chat_id,
+                    open_id=reply_open_id,
                     user_open_id=sender_open_id,
                 )
             else:
                 reply = await self._call_adp_batch(
-                    user_query, session_id,
-                    chat_id=reply_chat_id, open_id=reply_open_id,
+                    user_query,
+                    session_id,
+                    chat_id=reply_chat_id,
+                    open_id=reply_open_id,
                     user_open_id=sender_open_id,
                 )
 
             if reply:
-                self._append_history(session_id, HistoryTurn(
-                    role="assistant", speaker="丁真", text=reply,
-                ))
+                self._append_history(
+                    session_id,
+                    HistoryTurn(
+                        role="assistant",
+                        speaker="丁真",
+                        text=reply,
+                    ),
+                )
 
         except Exception:
             logger.exception("处理消息异常 | user=%s", sender_open_id)
             try:
                 await self.feishu.send_msg_segments(
                     "[处理消息时发生错误，请稍后重试]",
-                    chat_id=reply_chat_id, open_id=reply_open_id,
+                    chat_id=reply_chat_id,
+                    open_id=reply_open_id,
                     max_length=self.bridge.max_msg_length,
                 )
             except Exception:
@@ -150,33 +175,44 @@ class MessageHandler:
 
     # ────────────────── ADP 调用 ──────────────────
 
-    async def _call_adp_batch(self, content, session_id, chat_id, open_id, user_open_id) -> str:
+    async def _call_adp_batch(
+        self, content, session_id, chat_id, open_id, user_open_id
+    ) -> str:
         """非流式：等 ADP 完整回复后再发送"""
         visitor_id = self._make_visitor_id(user_open_id, chat_id)
         reply = await self.adp.chat(content, session_id, visitor_id=visitor_id)
         if reply:
             await self.feishu.send_msg_segments(
                 reply,
-                chat_id=chat_id, open_id=open_id,
+                chat_id=chat_id,
+                open_id=open_id,
                 max_length=self.bridge.max_msg_length,
             )
-            logger.info("回复发送完成 | user=%s | visitor=%s | reply_len=%d",
-                        user_open_id, visitor_id, len(reply))
+            logger.info(
+                "回复发送完成 | user=%s | visitor=%s | reply_len=%d",
+                user_open_id,
+                visitor_id,
+                len(reply),
+            )
         return reply
 
-    async def _call_adp_stream(self, content, session_id, chat_id, open_id, user_open_id) -> str:
+    async def _call_adp_stream(
+        self, content, session_id, chat_id, open_id, user_open_id
+    ) -> str:
         """流式：仅发送 Type=reply 消息的 text.delta 分段，其他类型静默丢弃"""
         buffer = ""
         batch_size = self.bridge.streaming_batch_size
         visitor_id = self._make_visitor_id(user_open_id, chat_id)
         last_reply: str = ""
 
-        async for event in self.adp.chat_stream(content, session_id,
-                                                 visitor_id=visitor_id):
+        async for event in self.adp.chat_stream(
+            content, session_id, visitor_id=visitor_id
+        ):
             if event.event_type == "error":
                 await self.feishu.send_msg_segments(
                     event.content,
-                    chat_id=chat_id, open_id=open_id,
+                    chat_id=chat_id,
+                    open_id=open_id,
                     max_length=self.bridge.max_msg_length,
                 )
                 return event.content
@@ -193,30 +229,37 @@ class MessageHandler:
                     batch, buffer = buffer[:batch_size], buffer[batch_size:]
                     await self.feishu.send_msg_segments(
                         batch,
-                        chat_id=chat_id, open_id=open_id,
+                        chat_id=chat_id,
+                        open_id=open_id,
                         max_length=self.bridge.max_msg_length,
                     )
 
         if last_reply and (not buffer or last_reply != buffer):
             tail = last_reply
             if buffer and last_reply.startswith(buffer):
-                tail = last_reply[len(buffer):]
+                tail = last_reply[len(buffer) :]
             if tail.strip():
                 await self.feishu.send_msg_segments(
                     tail,
-                    chat_id=chat_id, open_id=open_id,
+                    chat_id=chat_id,
+                    open_id=open_id,
                     max_length=self.bridge.max_msg_length,
                 )
                 buffer = last_reply
         elif buffer.strip() and not last_reply:
             await self.feishu.send_msg_segments(
                 buffer,
-                chat_id=chat_id, open_id=open_id,
+                chat_id=chat_id,
+                open_id=open_id,
                 max_length=self.bridge.max_msg_length,
             )
 
-        logger.info("流式回复完成 | user=%s | visitor=%s | reply_len=%d",
-                    user_open_id, visitor_id, len(buffer))
+        logger.info(
+            "流式回复完成 | user=%s | visitor=%s | reply_len=%d",
+            user_open_id,
+            visitor_id,
+            len(buffer),
+        )
         return buffer
 
     # ────────────────── user_query 拼装 ──────────────────
@@ -256,7 +299,9 @@ class MessageHandler:
 
         history_block = ""
         if self.bridge.max_history_turns > 0:
-            turns = list(self._history.get(session_id, []))[-self.bridge.max_history_turns:]
+            turns = list(self._history.get(session_id, []))[
+                -self.bridge.max_history_turns :
+            ]
             if turns:
                 history_block = "[History]\n" + "\n".join(t.render() for t in turns)
 
@@ -273,12 +318,16 @@ class MessageHandler:
 
         max_len = self.bridge.max_query_length
         if len(query) > max_len:
-            query = self._trim_to_length(query, history_block, current_block,
-                                         ctx_line, system_block, max_len)
+            query = self._trim_to_length(
+                query, history_block, current_block, ctx_line, system_block, max_len
+            )
 
-        logger.debug("user_query 长度=%d | history_turns=%d | system_rules=%d",
-                     len(query), len(self._history.get(session_id, [])),
-                     len(self.bridge.system_prompts))
+        logger.debug(
+            "user_query 长度=%d | history_turns=%d | system_rules=%d",
+            len(query),
+            len(self._history.get(session_id, [])),
+            len(self.bridge.system_prompts),
+        )
         return query
 
     def _trim_to_length(
@@ -296,7 +345,7 @@ class MessageHandler:
         must_keep_len = prefix_len + suffix_len
         if must_keep_len >= max_len:
             budget = max_len - prefix_len - len("[Current] ") - 4
-            truncated_current = current_block[:max(0, budget)] + "..."
+            truncated_current = current_block[: max(0, budget)] + "..."
             parts = []
             if system_block:
                 parts.append(system_block)

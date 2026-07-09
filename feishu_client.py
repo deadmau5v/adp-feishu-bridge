@@ -175,12 +175,8 @@ class FeishuClient:
 
         # 发送者
         sender_id_obj = getattr(sender, "sender_id", None)
-        sender_open_id = (
-            getattr(sender_id_obj, "open_id", "") if sender_id_obj else ""
-        )
-        sender_user_id = (
-            getattr(sender_id_obj, "user_id", "") if sender_id_obj else ""
-        )
+        sender_open_id = getattr(sender_id_obj, "open_id", "") if sender_id_obj else ""
+        sender_user_id = getattr(sender_id_obj, "user_id", "") if sender_id_obj else ""
         sender_name = ""
 
         # 文本 + mentions
@@ -197,12 +193,14 @@ class FeishuClient:
 
             for m in getattr(msg, "mentions", []) or []:
                 m_id = getattr(m, "id", None)
-                mentions.append({
-                    "key": getattr(m, "key", "") or "",
-                    "open_id": getattr(m_id, "open_id", "") if m_id else "",
-                    "user_id": getattr(m_id, "user_id", "") if m_id else "",
-                    "name": getattr(m, "name", "") or "",
-                })
+                mentions.append(
+                    {
+                        "key": getattr(m, "key", "") or "",
+                        "open_id": getattr(m_id, "open_id", "") if m_id else "",
+                        "user_id": getattr(m_id, "user_id", "") if m_id else "",
+                        "name": getattr(m, "name", "") or "",
+                    }
+                )
 
         return {
             "message_id": message_id,
@@ -230,6 +228,7 @@ class FeishuClient:
     async def _get_tenant_token(self) -> str:
         """获取/缓存 tenant_access_token"""
         import time
+
         async with self._token_lock:
             if self._tenant_token and time.time() < self._token_expire_at - 60:
                 return self._tenant_token
@@ -274,7 +273,9 @@ class FeishuClient:
         if resp.status_code >= 400 or data.get("code", 0) not in (0,):
             logger.error(
                 "飞书 API 失败 | path=%s | status=%s | resp=%s",
-                path, resp.status_code, json.dumps(data, ensure_ascii=False)[:300],
+                path,
+                resp.status_code,
+                json.dumps(data, ensure_ascii=False)[:300],
             )
         return data
 
@@ -335,7 +336,9 @@ class FeishuClient:
         if len(text) <= max_length:
             segments = [text]
         else:
-            segments = [text[i:i + max_length] for i in range(0, len(text), max_length)]
+            segments = [
+                text[i : i + max_length] for i in range(0, len(text), max_length)
+            ]
 
         for i, seg in enumerate(segments):
             if i > 0:

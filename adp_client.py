@@ -38,13 +38,14 @@ logger = logging.getLogger(f"{APP_NAME}.adp")
 @dataclass
 class ADPEvent:
     """ADP SSE 事件（流式）"""
-    event_type: str          # text.delta / message.done / error / done 等
-    content: str             # 文本增量内容（text.delta 用）
-    final_reply: str         # 最终完整回复（message.done 且 Type=reply 时填入）
-    raw: dict                # 原始 JSON
-    is_final: bool           # 是否为流结束
-    message_type: str = ""   # 所属 message 的 Type：reply / thought / tool_call
-    message_id: str = ""     # 所属 message 的 MessageId
+
+    event_type: str  # text.delta / message.done / error / done 等
+    content: str  # 文本增量内容（text.delta 用）
+    final_reply: str  # 最终完整回复（message.done 且 Type=reply 时填入）
+    raw: dict  # 原始 JSON
+    is_final: bool  # 是否为流结束
+    message_type: str = ""  # 所属 message 的 Type：reply / thought / tool_call
+    message_id: str = ""  # 所属 message 的 MessageId
 
 
 class ADPClient:
@@ -107,12 +108,21 @@ class ADPClient:
                 "POST",
                 self.config.chat_url,
                 json=payload,
-                headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
             ) as resp:
                 if resp.status_code != 200:
                     body = await resp.aread()
-                    logger.error("ADP HTTP 非 200 | status=%s | body=%s", resp.status_code, body[:500])
-                    yield ADPEvent("error", f"[ADP HTTP {resp.status_code}]", "", {}, True)
+                    logger.error(
+                        "ADP HTTP 非 200 | status=%s | body=%s",
+                        resp.status_code,
+                        body[:500],
+                    )
+                    yield ADPEvent(
+                        "error", f"[ADP HTTP {resp.status_code}]", "", {}, True
+                    )
                     return
 
                 event_type = ""
@@ -123,7 +133,9 @@ class ADPClient:
 
                     if not line:
                         if data_buffer:
-                            ev = self._handle_sse_event(event_type, data_buffer, msg_type_map)
+                            ev = self._handle_sse_event(
+                                event_type, data_buffer, msg_type_map
+                            )
                             if ev:
                                 yield ev
                                 if ev.is_final:
@@ -182,14 +194,28 @@ class ADPClient:
         if kind == "text.delta":
             mid = data.get("MessageId", "")
             mtype = msg_type_map.get(mid, "")
-            return ADPEvent("text.delta", data.get("Text", ""), "", data, False,
-                            message_type=mtype, message_id=mid)
+            return ADPEvent(
+                "text.delta",
+                data.get("Text", ""),
+                "",
+                data,
+                False,
+                message_type=mtype,
+                message_id=mid,
+            )
 
         if kind == "text.replace":
             mid = data.get("MessageId", "")
             mtype = msg_type_map.get(mid, "")
-            return ADPEvent("text.replace", data.get("Text", ""), "", data, False,
-                            message_type=mtype, message_id=mid)
+            return ADPEvent(
+                "text.replace",
+                data.get("Text", ""),
+                "",
+                data,
+                False,
+                message_type=mtype,
+                message_id=mid,
+            )
 
         if kind == "message.done":
             msg = data.get("Message", {})
@@ -199,8 +225,15 @@ class ADPClient:
                 msg_type_map[mid] = mtype
             reply_text = self._extract_reply_text(msg) if mtype == "reply" else ""
             if reply_text:
-                return ADPEvent("message.done", "", reply_text, data, False,
-                                message_type=mtype, message_id=mid)
+                return ADPEvent(
+                    "message.done",
+                    "",
+                    reply_text,
+                    data,
+                    False,
+                    message_type=mtype,
+                    message_id=mid,
+                )
             return None
 
         if kind == "response.completed":
@@ -213,8 +246,14 @@ class ADPClient:
             logger.error("ADP error 事件 | code=%s | msg=%s", code, msg)
             return ADPEvent("error", f"[ADP {code}] {msg}", "", data, True)
 
-        if kind in ("request_ack", "response.created", "content.added",
-                    "message.processing", "reference.added", "quote_info.added"):
+        if kind in (
+            "request_ack",
+            "response.created",
+            "content.added",
+            "message.processing",
+            "reference.added",
+            "quote_info.added",
+        ):
             return None
 
         return None
@@ -230,7 +269,9 @@ class ADPClient:
                 parts.append(c.get("Text", ""))
         return "".join(parts).strip()
 
-    async def chat(self, content: str, session_id: str, visitor_id: str | None = None) -> str:
+    async def chat(
+        self, content: str, session_id: str, visitor_id: str | None = None
+    ) -> str:
         """
         非流式：只收集 ``Type=reply`` 的消息内容作为最终回复。
 
